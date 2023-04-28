@@ -6,20 +6,25 @@ import numpy as np
 import os
 # my packages
 from model import EFNet
-from event_utils import events_to_accumulate_voxel_torch
+from event_utils import events_to_accumulate_voxel_torch, RobustNorm
 from model import load_network
+import cv2
+# added mask for model input
 
+# 输入参数，调整下列值when new run
+img_path = '/cluster/work/cvl/leisun/davis346/blur-2023_03_22_10_10_46/1679451049018057.jpg'
+event_path = '/cluster/work/cvl/leisun/davis346/blur-2023_03_22_10_10_46/blur-2023_03_22_10_10_46.npy'
+result_path = '/cluster/work/cvl/leisun/davis346/result_1679451049018057.png'
+############
 
-# 输入参数
-img_path = '/cluster/work/cvl/leisun/davis346/blur-2023_03_22_10_10_46/1679451047868057.jpg'
-event_path = '/cluster/work/cvl/leisun/davis346/blur-2023_03_22_10_10_46.npy'
 expo_sync_mode = 'start'
 # weight_path = './net_g_latest_REBlur.pth'
 weight_path = './net_g_latest_GoPro.pth'
-result_path = '/cluster/work/cvl/leisun/davis346/result.png'
 expo_time = 25000
 sensor_size = (260, 346) # -》 (256, 344)
 num_bins = 6 # voxel channel number
+# 控制最大最小值的比例，消除hot pixel影响
+robustnorm = RobustNorm(low_perc=35, top_perc=65) # 95 85
 
 
 # 加载模型
@@ -31,7 +36,13 @@ model = load_network(model, weight_path, True, param_key='params')
 model.eval()
 
 ### 数据读取
-input_image = Image.open(img_path)
+# input_image = Image.open(img_path)
+input_image = cv2.imread(img_path)
+if input_image is None:
+    print(f'{img_path} does not exit!')
+input_image = torch.from_numpy(input_image.transpose(2, 0, 1)).float() / 255 # 0-1
+# print(f'DEBUG: input_image.shape:{input_image.shape}')
+
 input_events = np.load(event_path)
 # print(f'DEBUG: input_events:{input_events}')
 
@@ -41,9 +52,13 @@ preprocess = transforms.Compose([
     # transforms.Normalize(mean=[0.485, 0.456, 0.406],
     #                      std=[0.229, 0.224, 0.225])
 ])
-input_tensor = preprocess(input_image).unsqueeze(0).cuda()
+# image normalize
+# input_image = preprocess(input_image)/255 # add image normalize to 0-1
+input_tensor = input_image.unsqueeze(0).cuda()
+# print(f'img tensor.max:{input_tensor.max()}')
+# print(f'img tensor.min:{input_tensor.min()}')
 ## 1channel -> 3channels n c h w
-input_tensor = torch.cat([input_tensor,input_tensor,input_tensor], dim=1)
+# input_tensor = torch.cat([input_tensor,input_tensor,input_tensor], dim=1)
 
 
 ## Event 预处理
@@ -85,11 +100,13 @@ voxel = events_to_accumulate_voxel_torch(xs, ys, ts, ps, B=num_bins, sensor_size
 # voxel 没问题
 # print(f'DEBUG: voxel:{voxel}')
 
-# normalize
-voxel = voxel / abs(max(voxel.min(), voxel.max(), key=abs))  # -1 ~ 1
+# normalize CHANGED TO ROBUSTNORM!!
+# voxel = voxel / abs(max(voxel.min(), voxel.max(), key=abs))  # MaxNorm. DO NOT USE IT FOR DAVIS346!
+voxel = robustnorm(voxel)
+
 # voxel = voxel * abs(max(voxel.min(), voxel.max(), key=abs))
-print(f'voxel.max:{voxel.max()}')
-print(f'voxel.min:{voxel.min()}')
+# print(f'voxel.max:{voxel.max()}')
+# print(f'voxel.min:{voxel.min()}')
 
 voxel = voxel.unsqueeze(0)
 # print(f'DEBUG: voxel after normalize:{voxel}')
@@ -97,8 +114,15 @@ voxel = voxel.unsqueeze(0)
 # 截取至(256, 344)
 input_tensor = input_tensor[:,:, :256, :344]
 # print(f'DEBUG: input_tensor:{input_tensor}')
-
 voxel = voxel[:,:, :256, :344]
+
+## mask
+mask = voxel
+mask = mask.sum(dim=1)
+mask = mask.unsqueeze(1)
+mask[mask!=0.]=1.
+# print(mask)
+mask = mask.cuda()
 # print(f'DEBUG: voxel:{voxel}')
 
 # voxel *= 100000000000000000.
@@ -106,7 +130,7 @@ voxel = voxel[:,:, :256, :344]
 
 # 进行推理
 with torch.no_grad():
-    output_tensor = model(x=input_tensor, event=voxel)
+    output_tensor = model(x=input_tensor, event=voxel, mask=mask) # added mask
     # print(f'DEBUG: output_tensor:{output_tensor}')
 
 output_tensor = output_tensor.cpu()
