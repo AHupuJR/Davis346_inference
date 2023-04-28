@@ -108,6 +108,7 @@ voxel = robustnorm(voxel)
 # print(f'voxel.max:{voxel.max()}')
 # print(f'voxel.min:{voxel.min()}')
 
+# TODO，调整该值的相对大小可以起到类似调整阈值的作用，但是要将它的数据范围限定在-1～1！
 voxel = voxel.unsqueeze(0)
 # print(f'DEBUG: voxel after normalize:{voxel}')
 
